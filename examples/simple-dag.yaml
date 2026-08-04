@@ -1,0 +1,63 @@
+# simple-dag.yaml — Allin-Scheduler 示例 DAG
+# 仿 TMC 智慧空间助手 Phase 2 M13~M14 场景
+
+name: "Phase 2 AR 导航模块"
+
+max_concurrency: 5
+stall_timeout_minutes: 10
+
+nodes:
+  # ── 第一批: 前置调研 + 架构方案 ──
+  - node_id: m13-webxr-presearch
+    assignee: desktop-engineer
+    parents: []
+    goal: "调研 iOS Safari 和 Android Chrome 的 WebXR 兼容性，输出兼容矩阵"
+    output_path: research/webxr-compatibility.md
+    verification: "文件存在且非空"
+
+  - node_id: m13-arch-plan
+    assignee: architect
+    arch_phase: front
+    parents: [m13-webxr-presearch]
+    goal: "基于兼容性调研，设计 WebXR 降级方案（AR→方向提示→2D 三档），输出设计文档"
+    output_path: docs/downgrade-plan.md
+    verification: "文件存在且非空"
+
+  # ── 第二批: 并行开发 ──
+  - node_id: m13-threejs-scene
+    assignee: desktop-engineer
+    parents: [m13-arch-plan]
+    goal: "搭建 Three.js 基础 3D 场景，集成 WebXR API，实现 AR 会话初始化"
+    output_path: src/ar/scene.ts
+    verification: "代码文件存在且非空"
+
+  - node_id: m14-3d-arrow
+    assignee: desktop-engineer
+    parents: [m13-threejs-scene]
+    goal: "实现程序化 3D 箭头模型（起点/拐点/终点三种样式），带浮动动画效果"
+    output_path: src/ar/Arrow3D.ts
+    verification: "代码文件存在且非空"
+
+  - node_id: m14-ar-ui
+    assignee: ui-ux-designer
+    parents: [m13-arch-plan]
+    goal: "设计 AR 导航页面的 HUD 叠加 UI（上方状态栏、下方控制条、模式切换按钮）"
+    output_path: contracts/design/ar-hud-tokens.json
+    verification: "文件存在且非空"
+
+  # ── 第三批: 集成 ──
+  - node_id: m14-nav-page
+    assignee: desktop-engineer
+    parents: [m14-3d-arrow, m14-ar-ui]
+    goal: "将箭头模型 + AR 场景 + HUD UI 集成为完整的 AR 导航页面组件 ARNav.vue"
+    output_path: src/components/ARNav.vue
+    verification: "代码文件存在且非空"
+
+  # ── 第四批: 后置架构审核 ──
+  - node_id: m14-arch-review
+    assignee: architect
+    arch_phase: back
+    parents: [m14-nav-page]
+    goal: "审核 AR 导航模块的交付物，确认契约一致性，更新 contracts/ 中的接口定义"
+    output_path: contracts/api/openapi.yaml
+    verification: "文件存在"

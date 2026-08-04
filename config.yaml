@@ -1,0 +1,37 @@
+# Allin-Scheduler 全局配置
+
+project:
+  root: "."
+  name: "my-project"
+
+# 并发限制
+max_concurrency: 5
+
+# 超时
+stall_timeout_minutes: 10
+api_retry_count: 2
+
+# 门禁配置
+gates:
+  g0: auto
+  g1: auto
+  g2: auto
+  g3: qa-engineer
+  g4: devops-engineer
+
+# 角色列表
+roles:
+  - product-manager
+  - architect
+  - backend-engineer
+  - desktop-engineer
+  - ui-ux-designer
+  - qa-engineer
+  - devops-engineer
+
+# 产出校验标准
+verification:
+  "*-engineer": "代码文件存在且非空"
+  qa-engineer: "测试文件存在且非空"
+  architect: "契约/文档文件存在"
+  default: "对应文档存在"
