@@ -1,0 +1,28 @@
+{
+  "name": "Phase 2 AR 导航模块",
+  "node_count": 7,
+  "max_concurrency": 5,
+  "stall_timeout": 10,
+  "batches": [
+    [
+      "m13-webxr-presearch"
+    ],
+    [
+      "m13-arch-plan"
+    ],
+    [
+      "m13-threejs-scene",
+      "m14-ar-ui"
+    ],
+    [
+      "m14-3d-arrow"
+    ],
+    [
+      "m14-nav-page"
+    ],
+    [
+      "m14-arch-review"
+    ]
+  ],
+  "validation_errors": []
+}

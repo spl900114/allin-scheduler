@@ -1,5 +1,4 @@
-# Allin-Scheduler 全局配置
-
+# Allin-Scheduler 全局配置（通用版）
 project:
   root: "."
   name: "my-project"
@@ -11,6 +10,9 @@ max_concurrency: 5
 stall_timeout_minutes: 10
 api_retry_count: 2
 
+# 输出目录（相对运行目录）
+output_dir: "output"
+
 # 门禁配置
 gates:
   g0: auto
@@ -19,17 +21,21 @@ gates:
   g3: qa-engineer
   g4: devops-engineer
 
-# 角色列表
+# 角色列表（通用版默认覆盖常见 AI 开发角色，可按项目增删；
+# DAG 里用了列表外的角色会报验证警告）
 roles:
   - product-manager
   - architect
   - backend-engineer
+  - frontend-engineer
   - desktop-engineer
   - ui-ux-designer
   - qa-engineer
   - devops-engineer
+  - data-engineer
+  - ml-engineer
 
-# 产出校验标准
+# 产物校验标准
 verification:
   "*-engineer": "代码文件存在且非空"
   qa-engineer: "测试文件存在且非空"

@@ -1,63 +1,80 @@
-# simple-dag.yaml — Allin-Scheduler 示例 DAG
-# 仿 TMC 智慧空间助手 Phase 2 M13~M14 场景
+# simple-dag.yaml — Allin-Scheduler 通用示例 DAG
+# 示例场景：给"智能客服知识助手"增加 RAG 问答功能（关键路径）
 
-name: "Phase 2 AR 导航模块"
+name: "智能客服知识助手 - RAG 问答关键路径"
 
-max_concurrency: 5
-stall_timeout_minutes: 10
+max_concurrency: 4
+stall_timeout_minutes: 15
 
 nodes:
-  # ── 第一批: 前置调研 + 架构方案 ──
-  - node_id: m13-webxr-presearch
-    assignee: desktop-engineer
+  # ---------- 第一批：前置调研（无依赖，可并行） ----------
+  - node_id: rag-retrieval-presearch
+    assignee: backend-engineer
     parents: []
-    goal: "调研 iOS Safari 和 Android Chrome 的 WebXR 兼容性，输出兼容矩阵"
-    output_path: research/webxr-compatibility.md
-    verification: "文件存在且非空"
+    effort: 0.5
+    goal: "调研 RAG 检索方案（BM25 + 向量混合召回），输出选型对比"
+    output_path: research/rag-retrieval-comparison.md
+    verification: "文件存在且含 3 种方案对比表"
 
-  - node_id: m13-arch-plan
+  - node_id: kb-schema-design
+    assignee: data-engineer
+    parents: []
+    effort: 0.5
+    goal: "设计知识库数据 schema（文档/分块/向量 + 索引策略）"
+    output_path: docs/design/kb-schema.md
+    verification: "SQLite DDL 完整 + 索引设计 + seed 策略"
+
+  # ---------- 第二批：架构定方案（依赖调研结果） ----------
+  - node_id: rag-arch-plan
     assignee: architect
     arch_phase: front
-    parents: [m13-webxr-presearch]
-    goal: "基于兼容性调研，设计 WebXR 降级方案（AR→方向提示→2D 三档），输出设计文档"
-    output_path: docs/downgrade-plan.md
-    verification: "文件存在且非空"
+    parents: [rag-retrieval-presearch, kb-schema-design]
+    effort: 1
+    goal: "基于调研结果确定 RAG 架构（召回/重排/生成链路），输出设计文档"
+    output_path: docs/design/rag-architecture.md
+    verification: "链路图 + 接口契约 + 依赖清单"
 
-  # ── 第二批: 并行开发 ──
-  - node_id: m13-threejs-scene
-    assignee: desktop-engineer
-    parents: [m13-arch-plan]
-    goal: "搭建 Three.js 基础 3D 场景，集成 WebXR API，实现 AR 会话初始化"
-    output_path: src/ar/scene.ts
-    verification: "代码文件存在且非空"
+  # ---------- 第三批：并行开发 ----------
+  - node_id: rag-ingest-pipeline
+    assignee: backend-engineer
+    parents: [rag-arch-plan]
+    effort: 2
+    goal: "实现文档解析 -> 分块 -> 向量化的入库管道"
+    output_path: src/backend/ingest.py
+    verification: "代码存在 + 能跑通空文档入库"
 
-  - node_id: m14-3d-arrow
-    assignee: desktop-engineer
-    parents: [m13-threejs-scene]
-    goal: "实现程序化 3D 箭头模型（起点/拐点/终点三种样式），带浮动动画效果"
-    output_path: src/ar/Arrow3D.ts
-    verification: "代码文件存在且非空"
+  - node_id: rag-chat-ui
+    assignee: frontend-engineer
+    parents: [rag-arch-plan]
+    effort: 1.5
+    goal: "实现问答对话界面（流式输出 + 引用来源折叠）"
+    output_path: src/frontend/views/ChatView.vue
+    verification: "构建通过 + 流式渲染可用"
 
-  - node_id: m14-ar-ui
-    assignee: ui-ux-designer
-    parents: [m13-arch-plan]
-    goal: "设计 AR 导航页面的 HUD 叠加 UI（上方状态栏、下方控制条、模式切换按钮）"
-    output_path: contracts/design/ar-hud-tokens.json
-    verification: "文件存在且非空"
+  # ---------- 第四批：集成 ----------
+  - node_id: rag-qa-integration
+    assignee: backend-engineer
+    parents: [rag-ingest-pipeline, rag-chat-ui]
+    effort: 1
+    goal: "打通 检索 -> 生成 -> 前端引用 的完整链路"
+    output_path: src/backend/qa_router.py
+    verification: "端到端调用通过 + 引用来源正确"
 
-  # ── 第三批: 集成 ──
-  - node_id: m14-nav-page
-    assignee: desktop-engineer
-    parents: [m14-3d-arrow, m14-ar-ui]
-    goal: "将箭头模型 + AR 场景 + HUD UI 集成为完整的 AR 导航页面组件 ARNav.vue"
-    output_path: src/components/ARNav.vue
-    verification: "代码文件存在且非空"
-
-  # ── 第四批: 后置架构审核 ──
-  - node_id: m14-arch-review
+  # ---------- 第五批：后置架构审核 ----------
+  - node_id: rag-arch-review
     assignee: architect
     arch_phase: back
-    parents: [m14-nav-page]
-    goal: "审核 AR 导航模块的交付物，确认契约一致性，更新 contracts/ 中的接口定义"
+    parents: [rag-qa-integration]
+    effort: 0.5
+    goal: "审核 RAG 模块交付物，更新 OpenAPI 契约与 ADR"
     output_path: contracts/api/openapi.yaml
-    verification: "文件存在"
+    verification: "OpenAPI diff 列出新增 endpoint + 字段"
+
+  # ---------- 第六批：验收 ----------
+  - node_id: rag-acceptance
+    assignee: qa-engineer
+    parents: [rag-arch-review]
+    effort: 1
+    goal: "P0 验收：检索准确率 / 流式响应 / 引用正确性"
+    output_path: docs/acceptance-test-rag.md
+    verification: "验收用例全过 + 截图 + 性能基线（首字 < 1s）"

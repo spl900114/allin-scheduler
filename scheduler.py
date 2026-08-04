@@ -1,46 +1,68 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Allin-Scheduler — 通用 AI Agent 多角色编排调度器
+Allin-Scheduler — 通用 AI Agent 多角色编排调度器（通用版）
 
-不依赖任何特定 AI 框架，纯 Python 标准库。
-解析 DAG YAML → 按依赖拓扑排序 → 按角色分组 → 输出调度计划。
+纯 Python 标准库 + PyYAML：
+解析 DAG YAML -> 按依赖拓扑排序 -> 按角色分批 -> 输出调度计划 / Markdown 报告。
+
+不依赖任何特定 AI Agent 框架（Codex / Hermes / ChatGPT / Claude /
+通义千问 / 文心一言 ...），本脚本只负责"规划"，
+实际的派发 / 执行 / 验收由宿主 Agent 按 SKILL.md 完成。
 
 用法:
-  python scheduler.py dag.yaml               # 解析 DAG 生成调度计划
-  python scheduler.py dag.yaml --report       # 生成 markdown 报告
-  python scheduler.py dag.yaml --validate     # 仅验证 DAG 拓扑（无循环检测）
+  python scheduler.py dag.yaml                 # 解析 DAG 生成调度计划(JSON)
+  python scheduler.py dag.yaml --report        # 生成 markdown 报告
+  python scheduler.py dag.yaml --validate      # 仅验证 DAG 拓扑(无环/依赖有效)
+  python scheduler.py dag.yaml --verify        # 完整性门控:校验各节点 output_path 是否存在
+  python scheduler.py dag.yaml --config my.yaml  # 指定配置文件(默认同目录 config.yaml)
 """
 
 import json
 import os
 import sys
-import re
 from pathlib import Path
 
 try:
     import yaml
 except ImportError:
-    print("""
-    [ERROR] PyYAML 未安装。请运行:
-      pip install pyyaml
-    或使用 Python 3.11+ 内置的 tomllib 替代。
-    """, file=sys.stderr)
+    print("[ERROR] PyYAML 未安装，请先运行: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
 
-# ──────────────────────────────────────────────
-# DAG 模型
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# 0. 编码兜底：Windows GBK 控制台打印 emoji/中文会 UnicodeEncodeError
+# ---------------------------------------------------------------------------
+def _fix_console_encoding():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
-ALL_ROLES = [
-    "product-manager", "architect", "backend-engineer",
-    "desktop-engineer", "ui-ux-designer", "qa-engineer", "devops-engineer",
+
+_fix_console_encoding()
+
+DEFAULT_ROLES = [
+    "product-manager",
+    "architect",
+    "backend-engineer",
+    "frontend-engineer",
+    "desktop-engineer",
+    "ui-ux-designer",
+    "qa-engineer",
+    "devops-engineer",
+    "data-engineer",
+    "ml-engineer",
 ]
-
 MAX_CONCURRENCY_DEFAULT = 5
 STALL_TIMEOUT_DEFAULT = 10  # minutes
+OUTPUT_DIR_DEFAULT = "output"
 
 
+# ---------------------------------------------------------------------------
+# DAG 模型
+# ---------------------------------------------------------------------------
 class DAGNode:
     """单个 DAG 任务节点"""
 
@@ -53,6 +75,7 @@ class DAGNode:
         self.context = data.get("context", "")
         self.output_path = data.get("output_path", "")
         self.verification = data.get("verification", "文件存在且非空")
+        self.effort = data.get("effort", 0)  # 可选：预估人天，用于排序
         self._dag = dag
 
     def __repr__(self):
@@ -62,14 +85,23 @@ class DAGNode:
 class DAG:
     """有向无环图 — 任务依赖拓扑"""
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, config: dict = None):
+        config = config or {}
         self.name = data.get("name", "unnamed")
-        self.max_concurrency = data.get("max_concurrency", MAX_CONCURRENCY_DEFAULT)
-        self.stall_timeout = data.get("stall_timeout_minutes", STALL_TIMEOUT_DEFAULT)
+        self.max_concurrency = data.get(
+            "max_concurrency",
+            config.get("max_concurrency", MAX_CONCURRENCY_DEFAULT),
+        )
+        self.stall_timeout = data.get(
+            "stall_timeout_minutes",
+            config.get("stall_timeout_minutes", STALL_TIMEOUT_DEFAULT),
+        )
+        self.output_dir = config.get("output_dir", OUTPUT_DIR_DEFAULT)
+        self.roles = list(config.get("roles") or DEFAULT_ROLES)
         raw_nodes = data.get("nodes", [])
         self.nodes = {n["node_id"]: DAGNode(n, self) for n in raw_nodes}
 
-    def validate(self) -> list[str]:
+    def validate(self) -> list:
         """返回错误列表，空 = 验证通过"""
         errors = []
 
@@ -90,7 +122,7 @@ class DAG:
                     cycle.append(v)
                     if v == nid:
                         break
-                errors.append(f"[CYCLE] 循环依赖: {' → '.join(reversed(cycle))} → {nid}")
+                errors.append(f"[CYCLE] 循环依赖: {' -> '.join(reversed(cycle))} -> {nid}")
                 return
             if nid in visited:
                 return
@@ -105,14 +137,17 @@ class DAG:
         for nid in self.nodes:
             dfs(nid)
 
-        # 3. 检查角色是否在已知列表中
+        # 3. 检查角色是否在已配置角色列表中
         for nid, node in self.nodes.items():
-            if node.assignee not in ALL_ROLES:
-                errors.append(f"[{nid}] 角色 '{node.assignee}' 不在已知角色列表中")
+            if node.assignee not in self.roles:
+                errors.append(
+                    f"[{nid}] 角色 '{node.assignee}' 不在已配置角色列表中"
+                    "（可在 config.yaml 的 roles 中补充）"
+                )
 
         return errors
 
-    def topo_sort(self) -> list[str]:
+    def topo_sort(self) -> list:
         """拓扑排序，按依赖关系排序节点 ID"""
         in_degree = {nid: len(node.parents) for nid, node in self.nodes.items()}
         graph = {nid: [] for nid in self.nodes}
@@ -124,7 +159,7 @@ class DAG:
         result = []
 
         while queue:
-            queue.sort(key=lambda nid: self._estimate_weight(nid), reverse=True)
+            queue.sort(key=self._estimate_weight, reverse=True)
             current = queue.pop(0)
             result.append(current)
             for neighbor in graph[current]:
@@ -134,15 +169,19 @@ class DAG:
 
         if len(result) != len(self.nodes):
             remaining = set(self.nodes.keys()) - set(result)
-            raise ValueError(f"DAG 拓扑排序不完整: 剩余 {remaining} 节点，可能存在循环依赖")
+            raise ValueError(
+                f"DAG 拓扑排序不完整: 剩余 {remaining} 节点，可能存在循环依赖"
+            )
         return result
 
-    def _estimate_weight(self, node_id: str) -> int:
-        """估算节点工作量（不精确，仅用于排序）"""
+    def _estimate_weight(self, node_id: str):
+        """估计算子：effort(人天) 优先，其次 goal 长度"""
         node = self.nodes[node_id]
-        return len(node.goal)  # goal 越长 ≈ 工作量越大
+        if node.effort:
+            return node.effort
+        return len(node.goal)
 
-    def plan_batches(self) -> list[list[str]]:
+    def plan_batches(self) -> list:
         """按派发批次分组"""
         sorted_ids = self.topo_sort()
         node_map = self.nodes
@@ -152,7 +191,8 @@ class DAG:
         while len(assigned) < len(sorted_ids):
             # 找出所有 parent 都已分配的节点
             ready = [
-                nid for nid in sorted_ids
+                nid
+                for nid in sorted_ids
                 if nid not in assigned
                 and all(p in assigned for p in node_map[nid].parents)
             ]
@@ -160,11 +200,11 @@ class DAG:
                 raise ValueError("DAG 死锁: 有节点永远无法满足依赖")
 
             batch = []
-            # 按角色分组，同角色串行的放入同一个 batch
+            # 按角色分组，同一角色串行的放入不同批次（每批最多 1 个）
             role_count = {}
             for nid in ready:
                 role = node_map[nid].assignee
-                if role_count.get(role, 0) < 1:  # 同角色最多 1 个 per batch
+                if role_count.get(role, 0) < 1:
                     batch.append(nid)
                     role_count[role] = role_count.get(role, 0) + 1
                     if len(batch) >= self.max_concurrency:
@@ -187,17 +227,19 @@ class DAG:
         return result
 
 
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # 打印 / 报告
-# ──────────────────────────────────────────────
-
-def format_schedule_report(dag: DAG, batches: list[list[str]], errors: list[str]) -> str:
+# ---------------------------------------------------------------------------
+def format_schedule_report(dag: DAG, batches: list, errors: list) -> str:
     """生成 Markdown 格式的调度报告"""
     lines = []
     lines.append(f"# Allin-Scheduler 调度计划 — {dag.name}")
     lines.append("")
     lines.append(f"**节点总数:** {len(dag.nodes)}")
-    lines.append(f"**并行数上限:** {dag.max_concurrency}")
+    total_effort = sum(n.effort for n in dag.nodes.values())
+    if total_effort:
+        lines.append(f"**总预估人天:** {total_effort}")
+    lines.append(f"**并发数上限:** {dag.max_concurrency}")
     lines.append(f"**stall 超时:** {dag.stall_timeout} 分钟")
     lines.append("")
 
@@ -217,15 +259,20 @@ def format_schedule_report(dag: DAG, batches: list[list[str]], errors: list[str]
     lines.append("## 批次计划")
     lines.append("")
     for i, batch in enumerate(batches, 1):
-        lines.append(f"### 第 {i} 批 (共 {len(batch)} 个节点)")
+        lines.append(f"### 第 {i} 批（共 {len(batch)} 个节点）")
         lines.append("")
-        lines.append("| 节点 | 角色 | 依赖 | 目标摘要 |")
-        lines.append("|------|------|------|---------|")
+        lines.append("| 节点 | 角色 | 人天 | 依赖 | 目标摘要 |")
+        lines.append("|------|------|------|------|---------|")
         for nid in batch:
             node = dag.nodes[nid]
             p = ", ".join(node.parents) if node.parents else "—"
+            effort = f"{node.effort:g}" if node.effort else "—"
             goal = node.goal[:50] + "..." if len(node.goal) > 50 else node.goal
-            lines.append(f"| `{nid}` | `{node.assignee}` | {p} | {goal} |")
+            lines.append(f"| `{nid}` | `{node.assignee}` | {effort} | {p} | {goal} |")
+        batch_effort = sum(dag.nodes[nid].effort for nid in batch)
+        if batch_effort:
+            lines.append("")
+            lines.append(f"本批预估人天: {batch_effort:g}")
         lines.append("")
 
     lines.append("## DAG 依赖拓扑")
@@ -234,7 +281,7 @@ def format_schedule_report(dag: DAG, batches: list[list[str]], errors: list[str]
     for nid in dag.topo_sort():
         node = dag.nodes[nid]
         indent = "  " * (len(node.parents) if node.parents else 0)
-        p = f" ← {', '.join(node.parents)}" if node.parents else ""
+        p = f" -> {', '.join(node.parents)}" if node.parents else ""
         lines.append(f"{indent}{nid} [{node.assignee}]{p}")
     lines.append("```")
     lines.append("")
@@ -242,10 +289,26 @@ def format_schedule_report(dag: DAG, batches: list[list[str]], errors: list[str]
     return "\n".join(lines)
 
 
-# ──────────────────────────────────────────────
-# CLI 入口
-# ──────────────────────────────────────────────
+def verify_outputs(dag: DAG, root: Path) -> tuple:
+    """完整性门控：检查每个节点的 output_path 是否存在且非空。
+    返回 (ok_list, missing_list)，元素为 (node_id, output_path)。
+    """
+    ok = []
+    missing = []
+    for nid, node in dag.nodes.items():
+        if not node.output_path:
+            continue
+        p = root / node.output_path
+        if p.exists() and p.stat().st_size > 0:
+            ok.append((nid, node.output_path))
+        else:
+            missing.append((nid, node.output_path))
+    return ok, missing
 
+
+# ---------------------------------------------------------------------------
+# CLI 入口
+# ---------------------------------------------------------------------------
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -257,6 +320,20 @@ def main():
         mode = "report"
     if "--validate" in sys.argv:
         mode = "validate"
+    if "--verify" in sys.argv:
+        mode = "verify"
+
+    # 配置文件：默认取脚本同目录 config.yaml，可用 --config 覆盖
+    config_path = Path(__file__).resolve().parent / "config.yaml"
+    if "--config" in sys.argv:
+        idx = sys.argv.index("--config")
+        if idx + 1 < len(sys.argv):
+            config_path = Path(sys.argv[idx + 1])
+
+    config = {}
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
 
     if not os.path.exists(dag_file):
         print(f"[ERROR] 文件不存在: {dag_file}", file=sys.stderr)
@@ -265,7 +342,7 @@ def main():
     with open(dag_file, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
-    dag = DAG(data)
+    dag = DAG(data, config=config)
 
     # 验证
     errors = dag.validate()
@@ -274,7 +351,7 @@ def main():
         print("  ⚠️  DAG 验证发现以下问题:")
         print("=" * 60)
         for e in errors:
-            print(f"  • {e}")
+            print(f"  - {e}")
         print()
         if mode == "validate":
             sys.exit(1)
@@ -285,6 +362,31 @@ def main():
     if mode == "validate":
         return
 
+    if mode == "verify":
+        root = Path(dag_file).resolve().parent
+        if "--root" in sys.argv:
+            idx = sys.argv.index("--root")
+            if idx + 1 < len(sys.argv):
+                root = Path(sys.argv[idx + 1]).resolve()
+        ok, missing = verify_outputs(dag, root)
+        print("=" * 60)
+        print(f"  📋 完整性门控校验 (root: {root})")
+        print("=" * 60)
+        total = len(ok) + len(missing)
+        print(f"  {len(ok)}/{total} 个节点产物存在且非空")
+        print()
+        for nid, path in ok:
+            print(f"  ✅ {nid} -> {path}")
+        for nid, path in missing:
+            print(f"  ❌ {nid} -> {path}")
+        if missing:
+            print()
+            print(f"  ⚠️  {len(missing)} 个节点未完成（exit=1）")
+            sys.exit(1)
+        print()
+        print("  🎉 全部产物就绪")
+        return
+
     # 拓扑排序 & 批次
     try:
         batches = dag.plan_batches()
@@ -292,13 +394,15 @@ def main():
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
 
+    output_dir = dag.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+
     if mode == "report":
         report = format_schedule_report(dag, batches, errors)
-        report_path = "output/schedule-report.md"
-        os.makedirs("output", exist_ok=True)
+        report_path = os.path.join(output_dir, "schedule-report.md")
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(report)
-        print(f"📄 报告已写入 {report_path}")
+        print(f"📋 报告已写入 {report_path}")
         print()
         print(report[:2000])
         if len(report) > 2000:
@@ -306,12 +410,12 @@ def main():
     else:
         # 默认 plan 模式
         print("=" * 60)
-        print(f"  📋 {dag.name} — 调度计划")
+        print(f"  📅 {dag.name} — 调度计划")
         print("=" * 60)
-        print(f"  总节点: {len(dag.nodes)} | 并行上限: {dag.max_concurrency}")
+        print(f"  总节点: {len(dag.nodes)} | 并发上限: {dag.max_concurrency}")
         print()
         for i, batch in enumerate(batches, 1):
-            print(f"  ───── 第 {i} 批 ({len(batch)} 个节点) ─────")
+            print(f"  ──────── 第 {i} 批 ({len(batch)} 个节点) ────────")
             for nid in batch:
                 node = dag.nodes[nid]
                 p = f" [等待: {', '.join(node.parents)}]" if node.parents else ""
@@ -325,12 +429,16 @@ def main():
             "max_concurrency": dag.max_concurrency,
             "stall_timeout": dag.stall_timeout,
             "batches": batches,
+            "total_effort": sum(n.effort for n in dag.nodes.values()),
+            "effort_by_batch": [
+                sum(dag.nodes[nid].effort for nid in b) for b in batches
+            ],
             "validation_errors": errors,
         }
-        os.makedirs("output", exist_ok=True)
-        with open("output/schedule-plan.json", "w", encoding="utf-8") as f:
+        plan_path = os.path.join(output_dir, "schedule-plan.json")
+        with open(plan_path, "w", encoding="utf-8") as f:
             json.dump(plan_json, f, indent=2, ensure_ascii=False)
-        print(f"📄 JSON 计划已写入 output/schedule-plan.json")
+        print(f"📋 JSON 计划已写入 {plan_path}")
 
 
 if __name__ == "__main__":
