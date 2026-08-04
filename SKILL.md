@@ -65,17 +65,54 @@
 
 ---
 
+## 调度模式检测
+
+allin-scheduler 在 Phase 0 之前先检测当前 Agent 环境支持哪种调度模式：
+
+| 模式 | 检测条件 | 行为 |
+|------|---------|------|
+| **多子 Agent 模式** | 框架支持创建/派发子 Agent（如 Hermes delegate_task、Claude Project 多 Agent、自定义多实例） | **按需自动创建角色子 Agent**，按 DAG 并行派发 |
+| **单 Agent 模式（Fallback）** | 不支持子 Agent / 用户未配置多角色 | 编排内核自己扮演全部角色，按 DAG 拓扑顺序**串行执行** |
+
+> 单 Agent 模式没有并行加速，但流程完整（Grill → DAG → 门禁），一样能用。
+
+---
+
 ## 角色列表
 
 | 角色标识 | 专长 | 调度方式 |
 |----------|------|---------|
-| `product-manager` | 需求 / PRD / 功能规划 | 独立 Agent |
-| `architect` | 系统架构 / 契约 / 技术选型 | 独立 Agent |
-| `backend-engineer` | API / DB / 业务逻辑 | 独立 Agent |
-| `desktop-engineer` | 前端 / 桌面端 | 独立 Agent |
-| `ui-ux-designer` | 界面 / 交互设计 | 独立 Agent |
-| `qa-engineer` | 测试策略 / 测试编写 | 独立 Agent |
-| `devops-engineer` | CI/CD / 部署 / 监控 | 独立 Agent |
+| `product-manager` | 需求 / PRD / 功能规划 | 独立 Agent / 编排内核自演 |
+| `architect` | 系统架构 / 契约 / 技术选型 | 独立 Agent / 编排内核自演 |
+| `backend-engineer` | API / DB / 业务逻辑 | 独立 Agent / 编排内核自演 |
+| `desktop-engineer` | 前端 / 桌面端 | 独立 Agent / 编排内核自演 |
+| `ui-ux-designer` | 界面 / 交互设计 | 独立 Agent / 编排内核自演 |
+| `qa-engineer` | 测试策略 / 测试编写 | 独立 Agent / 编排内核自演 |
+| `devops-engineer` | CI/CD / 部署 / 监控 | 独立 Agent / 编排内核自演 |
+
+### 多子 Agent 模式：按需自动创建角色
+
+当处于多子 Agent 模式时，编排内核在 Phase 2 解析 DAG 后**自动识别需要哪些角色**，然后**按需创建**对应的子 Agent：
+
+```
+DAG 用了 architect + desktop-engineer + qa-engineer
+     ↓
+编排内核检查: 这 3 个角色有现成子 Agent 吗？
+     ├── 有 → 直接复用
+     └── 没有 → 自动创建
+           ├── 创建 arch-Agent（注入架构师 SOUL + 契约上下文）
+           ├── 创建 frontend-Agent（注入前端 SOUL + 代码上下文）
+           └── 创建 qa-Agent（注入测试 SOUL + 测试上下文）
+     ↓
+按 DAG 依赖并行派发
+```
+
+**创建角色时注入的内容：**
+- 角色身份（该角色的专业定位、能力边界）
+- 项目上下文（PROJECT_ROOT、契约指针、前置批次摘要）
+- 当前 DAG 节点的 goal + output_path + verification
+
+**角色复用策略：** 同一项目多次调度时，已创建的角色子 Agent 保留在当前项目上下文中，下次可直接复用，避免重复创建。
 
 ---
 
@@ -153,22 +190,50 @@ exploring → specifying → bridging → approved-for-build → executing → c
 
 ---
 
-## Phase 3：并行派发
+## Phase 3：派发（多子 Agent / 单 Agent）
 
-### 派发规则
+### 多子 Agent 模式：并行派发
 
 ```
-parents 为空的节点 → 并行派发（≤并发数，超出时分批发出）
+parents 为空的节点 → 按需创建/复用子 Agent 并并行派发（≤并发数）
 parents 不为空的节点 → 等所有 parent 完成后分批发出
 ```
 
-### 批次拆分
+批次拆分规则：
+- 每批 ≤ max_concurrency 个并发（默认 5）
+- 排序策略：工作量大的节点优先发出
+- 第二批在上批全部返回后发出
 
-| 规则 | 说明 |
-|------|------|
-| 最大并发 | config.yaml 中 max_concurrency（默认 5） |
-| 排序 | 工作量大的节点优先发出 |
-| 等待 | 第二批在上批全部返回后发出 |
+**创建子 Agent 的 context 注入模板：**
+```
+PROJECT_ROOT=<绝对路径>
+角色: <当前角色名>
+任务: <当前节点 goal>
+产出路径: <output_path>
+完成标准: <verification>
+[前置产出]
+<上一批的关键产出摘要>
+─────────────────────────────
+```
+
+### 单 Agent 模式：串行执行
+
+没有子 Agent 能力时，编排内核自己按 DAG 拓扑顺序逐个执行：
+
+```
+按 topo_sort 顺序:
+  for each 节点:
+    执行该节点的 goal
+    产出到 output_path
+    自我完整性校验
+    通过 → 继续下一个
+    不通过 → 回退重做（≤2 轮）
+```
+
+**区别：**
+- 没有并行加速——一次只做一个任务
+- 没有角色切换——编排内核自己扮演所有角色
+- 但流程完整——Grill → DAG → 执行 → 门禁，一个不落
 
 ### 批次间上下文传递
 
